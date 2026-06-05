@@ -1,7 +1,9 @@
 
+#define DEBUG_SERIAL 0 // Set to 1 to enable serial debug output
+
 const int NUM_SLIDERS = 4;
 const int analogInputs[NUM_SLIDERS] = {A0, A1, A2, A3};
-const size_t SLIDER_PAYLOAD_BUFFER_SIZE = NUM_SLIDERS * 4;
+const size_t SLIDER_PAYLOAD_BUFFER_SIZE = (NUM_SLIDERS * 3) + (NUM_SLIDERS - 1) + 1; // 3 digits/slider + separators + null terminator
 const uint8_t SAMPLES_PER_SLIDER = 3;
 const unsigned long SAMPLE_INTERVAL_MS = 1;
 const uint8_t SEND_REPEAT_COUNT = 2;
@@ -10,8 +12,8 @@ const unsigned long STARTUP_STABILIZE_MS = 100;
 const int SNAP_TO_MAX_PERCENT = 99;
 const int SNAP_TO_MIN_PERCENT = 1;
 
-int analogSliderValues[NUM_SLIDERS];
-int sliderSampleSums[NUM_SLIDERS] = {0};
+uint16_t analogSliderValues[NUM_SLIDERS] = {0};
+int32_t sliderSampleSums[NUM_SLIDERS] = {0};
 uint8_t sliderSampleCounts[NUM_SLIDERS] = {0};
 bool sliderPrimed[NUM_SLIDERS] = {false};
 int currentSamplingSlider = 0;
@@ -19,7 +21,7 @@ unsigned long lastSampleTime = 0;
 unsigned long startupStartTime = 0;
 bool startupInitialized = false;
 
-int prevSliderValues[NUM_SLIDERS] = {0};
+uint16_t prevSliderValues[NUM_SLIDERS] = {0};
 const int SLIDER_NOISE_THRESHOLD = 2;       // Increased threshold to reduce noise sensitivity
 const unsigned long MIN_SEND_INTERVAL = 50; // Minimum milliseconds between sends
 unsigned long lastSendTime = 0;
@@ -30,10 +32,10 @@ uint8_t pendingSendCount = 0;
 unsigned long lastRepeatSendTime = 0;
 
 bool buildSliderPayload(char *buffer, size_t bufferSize);
-void queueSliderValuesForSend(unsigned long now);
+bool queueSliderValuesForSend(unsigned long now);
 void processPendingSend(unsigned long now);
 bool allSlidersPrimed();
-int scaleSliderToPercent(int rawValue);
+int scaleSliderToPercent(uint16_t rawValue);
 
 void setup()
 {
@@ -87,17 +89,21 @@ void loop()
     // Send when changed (respecting MIN_SEND_INTERVAL) OR when periodic interval elapsed
     if ((changed && (now - lastSendTime >= MIN_SEND_INTERVAL)) || (now - lastPeriodicSend >= PERIODIC_SEND_INTERVAL))
     {
-        queueSliderValuesForSend(now);
-        lastSendTime = now;
-        lastPeriodicSend = now;
-
-        // Update previous values only after successful send
-        for (int i = 0; i < NUM_SLIDERS; i++)
+        if (queueSliderValuesForSend(now))
         {
-            prevSliderValues[i] = analogSliderValues[i];
+            lastSendTime = now;
+            lastPeriodicSend = now;
+
+            // Update previous values only after successful send
+            for (int i = 0; i < NUM_SLIDERS; i++)
+            {
+                prevSliderValues[i] = analogSliderValues[i];
+            }
         }
     }
-    // printSliderValues(); // For debug
+#if DEBUG_SERIAL
+    printSliderValues();
+#endif
 }
 
 bool sliderValuesChanged()
@@ -105,7 +111,7 @@ bool sliderValuesChanged()
     // Check if any slider has changed beyond the noise threshold
     for (int i = 0; i < NUM_SLIDERS; i++)
     {
-        if (abs(analogSliderValues[i] - prevSliderValues[i]) > SLIDER_NOISE_THRESHOLD)
+        if (abs((int)analogSliderValues[i] - (int)prevSliderValues[i]) > SLIDER_NOISE_THRESHOLD)
         {
             return true;
         }
@@ -123,13 +129,13 @@ void updateSliderValues()
 
     lastSampleTime = now;
 
-    int sample = analogRead(analogInputs[currentSamplingSlider]);
+    uint16_t sample = (uint16_t)analogRead(analogInputs[currentSamplingSlider]);
     sliderSampleSums[currentSamplingSlider] += sample;
     sliderSampleCounts[currentSamplingSlider]++;
 
     if (sliderSampleCounts[currentSamplingSlider] >= SAMPLES_PER_SLIDER)
     {
-        analogSliderValues[currentSamplingSlider] = sliderSampleSums[currentSamplingSlider] / SAMPLES_PER_SLIDER;
+        analogSliderValues[currentSamplingSlider] = (uint16_t)(sliderSampleSums[currentSamplingSlider] / SAMPLES_PER_SLIDER);
         sliderPrimed[currentSamplingSlider] = true;
         sliderSampleSums[currentSamplingSlider] = 0;
         sliderSampleCounts[currentSamplingSlider] = 0;
@@ -186,7 +192,7 @@ bool buildSliderPayload(char *buffer, size_t bufferSize)
     return true;
 }
 
-int scaleSliderToPercent(int rawValue)
+int scaleSliderToPercent(uint16_t rawValue)
 {
     // Use rounded integer math, then snap near endpoints to avoid edge jitter.
     long roundedPercent = ((long)rawValue * 100L + 511L) / 1023L;
@@ -204,15 +210,16 @@ int scaleSliderToPercent(int rawValue)
     return (int)roundedPercent;
 }
 
-void queueSliderValuesForSend(unsigned long now)
+bool queueSliderValuesForSend(unsigned long now)
 {
     if (!buildSliderPayload(pendingPayload, sizeof(pendingPayload)))
     {
-        return;
+        return false;
     }
 
     pendingSendCount = SEND_REPEAT_COUNT;
     lastRepeatSendTime = now - SEND_REPEAT_INTERVAL_MS;
+    return true;
 }
 
 void processPendingSend(unsigned long now)
@@ -232,11 +239,7 @@ void processPendingSend(unsigned long now)
     lastRepeatSendTime = now;
 }
 
-void sendSliderValues()
-{
-    queueSliderValuesForSend(millis());
-}
-
+#if DEBUG_SERIAL
 void printSliderValues()
 {
     for (int i = 0; i < NUM_SLIDERS; i++)
@@ -256,3 +259,4 @@ void printSliderValues()
         }
     }
 }
+#endif
